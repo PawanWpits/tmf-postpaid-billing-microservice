@@ -1,0 +1,5 @@
+# Created at 2026-10-27T14:25:48.706
+Boot Manifest-JAR contains absolute paths in classpath 'D:\TA-FORUM\Services\PostPaid-Bill-Microservices\billing-simulator-app\target\test-classes'
+Hint: <argLine>-Djdk.net.URLClassPath.disableClassPathURLCheck=true</argLine>
+'other' has different root
+

@@ -1,0 +1,13 @@
+com\wpits\document\config\RestClientConfig.class
+com\wpits\document\service\SimulatorAddressClient.class
+com\wpits\document\service\JasperCustomerBillPdfGenerator.class
+com\wpits\document\service\CustomerBillClient.class
+com\wpits\document\controller\DocumentController.class
+com\wpits\document\DocumentServiceApplication.class
+com\wpits\document\service\CustomerBillClient$1.class
+com\wpits\document\service\PdfDocumentService.class
+com\wpits\document\service\CustomerBillClient$CustomerBillClientException.class
+com\wpits\document\service\PdfDocumentService$DocumentGenerationResult.class
+com\wpits\document\service\PdfDocumentServiceImpl.class
+com\wpits\document\service\SimulatorAddressClient$AddressLookupException.class
+com\wpits\document\controller\DocumentController$BatchGenerationResponse.class
