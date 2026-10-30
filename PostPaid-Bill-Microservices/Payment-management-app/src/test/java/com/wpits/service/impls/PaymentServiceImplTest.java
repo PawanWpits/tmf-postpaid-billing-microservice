@@ -7,10 +7,13 @@ import com.wpits.dtos.MoneyDto;
 import com.wpits.dtos.PaymentDto;
 import com.wpits.dtos.PaymentItemDto;
 import com.wpits.dtos.PaymentMethodRefOrValueDto;
+import com.wpits.dtos.RelatedPartyDto;
 import com.wpits.entities.Payment;
+import com.wpits.helper.PaymentGatewayHelper;
 import com.wpits.repositories.PaymentRepository;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpMethod;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.client.MockRestServiceServer;
 import org.springframework.web.client.RestClient;
@@ -34,85 +37,75 @@ import static org.springframework.test.web.client.response.MockRestResponseCreat
 class PaymentServiceImplTest {
 
     @Test
-    void validatesOfferingAndDeductsBillBeforePersistingPayment() {
+    void chargesGatewayBeforeUpdatingBillAndSavingPayment() {
         PaymentRepository repository = mock(PaymentRepository.class);
+        PaymentGatewayHelper paymentGatewayHelper = mock(PaymentGatewayHelper.class);
         RestClient.Builder restClientBuilder = RestClient.builder();
         MockRestServiceServer server = MockRestServiceServer.bindTo(restClientBuilder).build();
         RestClient restClient = restClientBuilder.build();
         PaymentServiceImpl service = new PaymentServiceImpl(
-                restClient, repository, new ModelMapperConfig().modelMapper());
+                restClient, repository, new ModelMapperConfig().modelMapper(), paymentGatewayHelper);
 
         String accountHref = "http://localhost:8080/accounts/PA-001";
-        String offeringHref = "http://localhost:8082/product-offerings/PO-001";
+        String payerHref = "http://localhost:8080/individual/333";
         String orderHref = "http://localhost:8080/productOrdering/v4/productOrder/PO-ORDER";
         String billHref = "http://localhost:8081/customerBill/CB-001";
 
         server.expect(requestTo(accountHref))
                 .andExpect(method(HttpMethod.GET))
                 .andRespond(withSuccess("{}", MediaType.APPLICATION_JSON));
-        server.expect(requestTo(offeringHref))
+        server.expect(requestTo(payerHref))
                 .andExpect(method(HttpMethod.GET))
-                .andRespond(withSuccess("""
-                        {
-                          "amount":{"unit":"INR","value":100.00},
-                          "taxAmount":{"unit":"INR","value":10.50},
-                          "totalAmount":{"unit":"INR","value":110.50}
-                        }
-                        """, MediaType.APPLICATION_JSON));
+                .andRespond(withSuccess("{}", MediaType.APPLICATION_JSON));
+        server.expect(requestTo(orderHref))
+                .andExpect(method(HttpMethod.GET))
+                .andRespond(withSuccess("{}", MediaType.APPLICATION_JSON));
+        server.expect(requestTo(billHref))
+                .andExpect(method(HttpMethod.GET))
+                .andRespond(withSuccess("{}", MediaType.APPLICATION_JSON));
         server.expect(requestTo(orderHref))
                 .andExpect(method(HttpMethod.GET))
                 .andRespond(withSuccess("""
-                        {
-                          "productOrderItem": [{
-                            "quantity": 1,
-                            "itemPrice": [{
-                              "price": {
-                                "dutyFreeAmount": {"unit": "INR", "value": 25.00},
-                                "taxIncludedAmount": {"unit": "INR", "value": 27.63}
-                              }
-                            }]
-                          }]
-                        }
+                        {"id":"PO-ORDER"}
                         """, MediaType.APPLICATION_JSON));
         server.expect(requestTo(billHref))
                 .andExpect(method(HttpMethod.GET))
                 .andRespond(withSuccess("""
                         {
                           "state":"NEW",
-                          "remainingAmount":{"unit":"INR","value":200.00}
+                          "remainingAmount":{"unit":"INR","value":55.25}
                         }
                         """, MediaType.APPLICATION_JSON));
         server.expect(requestTo(billHref))
                 .andExpect(method(HttpMethod.PATCH))
-                .andExpect(content().string(org.hamcrest.Matchers.containsString("\"value\":144.75")))
+                .andExpect(content().string(org.hamcrest.Matchers.containsString("\"value\":0.00")))
                 .andRespond(withSuccess());
         when(repository.save(any(Payment.class))).thenAnswer(invocation -> invocation.getArgument(0));
 
-        PaymentDto payment = validPayment(accountHref, offeringHref, billHref);
-        payment.getPaymentItem().add(1, item("PO-ORDER", orderHref, "ProductOrder",
-                money("25.00"), money("2.63"), money("27.63")));
-        payment.setAmount(money("175.00"));
-        payment.setTaxAmount(money("18.38"));
-        payment.setTotalAmount(money("193.38"));
+        PaymentDto payment = validPayment(accountHref, orderHref, billHref);
+        when(paymentGatewayHelper.processPayment(new BigDecimal("165.75"), "INR", "Check"))
+                .thenReturn("{\"status\":\"success\",\"message\":\"Payment processed successfully\"}");
 
         PaymentDto created = service.create(payment);
 
         assertEquals("COMPLETED", created.getStatus());
-        assertEquals(new BigDecimal("193.38"), created.getTotalAmount().getValue());
+        assertEquals(new BigDecimal("165.75"), created.getTotalAmount().getValue());
         server.verify();
         verify(repository).save(any(Payment.class));
+        verify(paymentGatewayHelper).processPayment(new BigDecimal("165.75"), "INR", "Check");
     }
 
     @Test
     void rejectsPaymentWhenPaymentLevelTotalsDoNotMatchItems() {
         PaymentRepository repository = mock(PaymentRepository.class);
+        PaymentGatewayHelper paymentGatewayHelper = mock(PaymentGatewayHelper.class);
         RestClient.Builder restClientBuilder = RestClient.builder();
         MockRestServiceServer server = MockRestServiceServer.bindTo(restClientBuilder).build();
         PaymentServiceImpl service = new PaymentServiceImpl(
-                restClientBuilder.build(), repository, new ModelMapperConfig().modelMapper());
+                restClientBuilder.build(), repository, new ModelMapperConfig().modelMapper(), paymentGatewayHelper);
         PaymentDto payment = validPayment(
                 "http://localhost:8080/accounts/PA-001",
-                "http://localhost:8082/product-offerings/PO-001",
+                "http://localhost:8080/productOrdering/v4/productOrder/PO-ORDER",
                 "http://localhost:8081/customerBill/CB-001");
         payment.getTotalAmount().setValue(new BigDecimal("165.74"));
 
@@ -123,7 +116,31 @@ class PaymentServiceImplTest {
         server.verify();
     }
 
-    private PaymentDto validPayment(String accountHref, String offeringHref, String billHref) {
+    @Test
+    void doesNotContinueWhenGatewayDeclinesPayment() {
+        PaymentRepository repository = mock(PaymentRepository.class);
+        PaymentGatewayHelper paymentGatewayHelper = mock(PaymentGatewayHelper.class);
+        RestClient.Builder restClientBuilder = RestClient.builder();
+        MockRestServiceServer server = MockRestServiceServer.bindTo(restClientBuilder).build();
+        PaymentServiceImpl service = new PaymentServiceImpl(
+                restClientBuilder.build(), repository, new ModelMapperConfig().modelMapper(), paymentGatewayHelper);
+        PaymentDto payment = validPayment(
+                "http://localhost:8080/accounts/PA-001",
+                "http://localhost:8082/product-offerings/PO-001",
+                "http://localhost:8081/customerBill/CB-001");
+        when(paymentGatewayHelper.processPayment(new BigDecimal("165.75"), "INR", "Check"))
+                .thenReturn("{\"status\":\"declined\",\"message\":\"Insufficient funds\"}");
+
+        ResponseStatusException exception = assertThrows(
+                ResponseStatusException.class, () -> service.create(payment));
+
+        assertEquals(HttpStatus.PAYMENT_REQUIRED, exception.getStatusCode());
+        verify(paymentGatewayHelper).processPayment(new BigDecimal("165.75"), "INR", "Check");
+        verify(repository, org.mockito.Mockito.never()).save(any(Payment.class));
+        server.verify();
+    }
+
+    private PaymentDto validPayment(String accountHref, String orderHref, String billHref) {
         PaymentDto payment = new PaymentDto();
         payment.setName("Payment test");
         payment.setAmount(money("150.00"));
@@ -135,9 +152,14 @@ class PaymentServiceImplTest {
         account.setHref(accountHref);
         payment.setAccount(account);
 
+        RelatedPartyDto payer = new RelatedPartyDto();
+        payer.setHref("http://localhost:8080/individual/333");
+        payer.setId("333");
+        payment.setPayer(payer);
         payment.setPaymentMethod(new PaymentMethodRefOrValueDto());
+        payment.getPaymentMethod().setType("Check");
         payment.setPaymentItem(new ArrayList<>(List.of(
-                item("PO-001", offeringHref, "ProductOffering",
+                item("PO-ORDER", orderHref, "ProductOrder",
                         money("100.00"), money("10.50"), money("110.50")),
                 item("CB-001", billHref, "CustomerBill",
                         money("50.00"), money("5.25"), money("55.25")))));

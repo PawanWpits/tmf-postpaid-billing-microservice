@@ -4,8 +4,10 @@ import com.wpits.dtos.AccountRefDto;
 import com.wpits.dtos.MoneyDto;
 import com.wpits.dtos.PaymentDto;
 import com.wpits.dtos.PaymentItemDto;
+import com.wpits.dtos.PaymentMethodRefOrValueDto;
 import com.wpits.entities.Payment;
 import com.wpits.entities.PaymentItem;
+import com.wpits.helper.PaymentGatewayHelper;
 import com.wpits.repositories.PaymentRepository;
 import com.wpits.service.PaymentService;
 import lombok.RequiredArgsConstructor;
@@ -32,6 +34,7 @@ public class PaymentServiceImpl implements PaymentService {
         private final RestClient restClient;
         private final PaymentRepository paymentRepository;
         private final ModelMapper modelMapper;
+        private final PaymentGatewayHelper paymentGatewayHelper;
 
         @Override
         public PaymentDto create(PaymentDto paymentDto) {
@@ -160,6 +163,7 @@ public class PaymentServiceImpl implements PaymentService {
             //verify payer account
             verifyAccount(paymentDto.getPayer().getHref());
 
+
             //verify payment item - item hrefs
             paymentItems.forEach(item -> {
                 if (item.getItem() == null || item.getItem().getHref() == null || item.getItem().getHref().isBlank()) {
@@ -168,6 +172,10 @@ public class PaymentServiceImpl implements PaymentService {
                 verifyAccount(item.getItem().getHref());
             });
 
+            //requested payment amount and match with customer bill db and product order db amount
+
+            //Gateway
+            processGatewayPayment(itemTotalSum, paymentCurrency, paymentDto.getPaymentMethod());
             // Verify and update referenced resources.
             // CustomerBill remainingAmount, ProductOrder is only retrieved
             for (PaymentItemDto item : paymentItems) {
@@ -195,6 +203,40 @@ public class PaymentServiceImpl implements PaymentService {
 
             return modelMapper.map(savedPayment, PaymentDto.class);
         }
+
+    private void processGatewayPayment(BigDecimal amount, String currency, PaymentMethodRefOrValueDto paymentMethod) {
+
+            String method = paymentMethod.getType();
+
+        if (method == null || method.isBlank()) {
+            method = paymentMethod.getName();
+        }
+        if (method == null || method.isBlank()) {
+            method = paymentMethod.getId();
+        }
+        if (method == null || method.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,"Payment method type, name, or id is required for gateway processing");
+        }
+
+        String response = paymentGatewayHelper.processPayment(amount, currency, method);
+
+        if (response == null || response.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_GATEWAY,"Payment gateway returned an empty response");
+        }
+
+        try {
+
+            JSONObject gatewayResponse = new JSONObject(response);
+
+            if (!"success".equalsIgnoreCase(gatewayResponse.optString("status"))) {
+                throw new ResponseStatusException(HttpStatus.PAYMENT_REQUIRED,"Payment gateway did not approve the payment");
+            }
+        } catch (org.json.JSONException exception) {
+            throw new ResponseStatusException(HttpStatus.BAD_GATEWAY,"Payment gateway returned an invalid response", exception);
+        }
+
+        log.info("Payment gateway approved payment amount={} {}", amount, currency);
+    }
 
     private void verifyAccount(String href) {
 
